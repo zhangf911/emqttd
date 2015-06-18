@@ -28,12 +28,14 @@
 
 -author("Feng Lee <feng@emqtt.io>").
 
+-include("emqttd.hrl").
+
 -behaviour(gen_server).
 
 -define(SERVER, ?MODULE).
 
 %% API Exports 
--export([start_link/3]).
+-export([start_link/2, pool/0, table/0]).
 
 -export([lookup/1, register/1, unregister/1]).
 
@@ -41,9 +43,11 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
--record(state, {tab, statsfun}).
+-record(state, {id, tab, statsfun}).
 
--define(POOL, cm_pool).
+-define(CM_POOL, cm_pool).
+
+-define(CLIENT_TAB, mqtt_client).
 
 %%%=============================================================================
 %%% API
@@ -53,21 +57,24 @@
 %% @doc Start client manager
 %% @end
 %%------------------------------------------------------------------------------
--spec start_link(Id, TabId, StatsFun) -> {ok, pid()} | ignore | {error, any()} when
+-spec start_link(Id, StatsFun) -> {ok, pid()} | ignore | {error, any()} when
         Id :: pos_integer(),
-        TabId :: ets:tid(),
         StatsFun :: fun().
-start_link(Id, TabId, StatsFun) ->
-    gen_server:start_link(?MODULE, [Id, TabId, StatsFun], []).
+start_link(Id, StatsFun) ->
+    gen_server:start_link(?MODULE, [Id, StatsFun], []).
+
+pool() -> ?CM_POOL.
+
+table() -> ?CLIENT_TAB.
 
 %%------------------------------------------------------------------------------
 %% @doc Lookup client pid with clientId
 %% @end
 %%------------------------------------------------------------------------------
--spec lookup(ClientId :: binary()) -> pid() | undefined.
+-spec lookup(ClientId :: binary()) -> mqtt_client() | undefined.
 lookup(ClientId) when is_binary(ClientId) ->
-    case ets:lookup(emqttd_cm_sup:table(), ClientId) of
-	[{_, Pid, _}] -> Pid;
+    case ets:lookup(?CLIENT_TAB, ClientId) of
+	[Client] -> Client;
 	[] -> undefined
 	end.
 
@@ -75,10 +82,10 @@ lookup(ClientId) when is_binary(ClientId) ->
 %% @doc Register clientId with pid.
 %% @end
 %%------------------------------------------------------------------------------
--spec register(ClientId :: binary()) -> ok.
-register(ClientId) when is_binary(ClientId) ->
-    CmPid = gproc_pool:pick_worker(?POOL, ClientId),
-    gen_server:call(CmPid, {register, ClientId, self()}, infinity).
+-spec register(Client :: mqtt_client()) -> ok.
+register(Client = #mqtt_client{clientid = ClientId}) ->
+    CmPid = gproc_pool:pick_worker(?CM_POOL, ClientId),
+    gen_server:call(CmPid, {register, Client}, infinity).
 
 %%------------------------------------------------------------------------------
 %% @doc Unregister clientId with pid.
@@ -86,29 +93,29 @@ register(ClientId) when is_binary(ClientId) ->
 %%------------------------------------------------------------------------------
 -spec unregister(ClientId :: binary()) -> ok.
 unregister(ClientId) when is_binary(ClientId) ->
-    CmPid = gproc_pool:pick_worker(?POOL, ClientId),
+    CmPid = gproc_pool:pick_worker(?CM_POOL, ClientId),
     gen_server:cast(CmPid, {unregister, ClientId, self()}).
 
 %%%=============================================================================
 %%% gen_server callbacks
 %%%=============================================================================
 
-init([Id, TabId, StatsFun]) ->
-    gproc_pool:connect_worker(?POOL, {?MODULE, Id}),
-    {ok, #state{tab = TabId, statsfun = StatsFun}}.
+init([Id, StatsFun]) ->
+    gproc_pool:connect_worker(?CM_POOL, {?MODULE, Id}),
+    {ok, #state{id = Id, statsfun = StatsFun}}.
 
-handle_call({register, ClientId, Pid}, _From, State = #state{tab = Tab}) ->
-	case ets:lookup(Tab, ClientId) of
-        [{_, Pid, _}] ->
+handle_call({register, Client = #mqtt_client{clientid = ClientId, client_pid = Pid}}, _From, State) ->
+	case ets:lookup(?CLIENT_TAB, ClientId) of
+        [#mqtt_client{client_pid = Pid}] ->
 			lager:error("clientId '~s' has been registered with ~p", [ClientId, Pid]),
             ignore;
-		[{_, OldPid, MRef}] ->
+		[#mqtt_client{client_pid = OldPid, client_mon = MRef}] ->
 			lager:error("clientId '~s' is duplicated: pid=~p, oldpid=~p", [ClientId, Pid, OldPid]),
 			OldPid ! {stop, duplicate_id, Pid},
 			erlang:demonitor(MRef),
-            ets:insert(Tab, {ClientId, Pid, erlang:monitor(process, Pid)});
+            ets:insert(?CLIENT_TAB, Client#mqtt_client{client_mon = erlang:monitor(process, Pid)});
 		[] -> 
-            ets:insert(Tab, {ClientId, Pid, erlang:monitor(process, Pid)})
+            ets:insert(?CLIENT_TAB, Client#mqtt_client{client_mon = erlang:monitor(process, Pid)})
 	end,
     {reply, ok, setstats(State)};
 
@@ -116,11 +123,11 @@ handle_call(Req, _From, State) ->
     lager:error("unexpected request: ~p", [Req]),
     {reply, {error, badreq}, State}.
 
-handle_cast({unregister, ClientId, Pid}, State = #state{tab = TabId}) ->
-	case ets:lookup(TabId, ClientId) of
-	[{_, Pid, MRef}] ->
+handle_cast({unregister, ClientId, Pid}, State) ->
+	case ets:lookup(?CLIENT_TAB, ClientId) of
+	[#mqtt_client{client_pid = Pid, client_mon = MRef}] ->
 		erlang:demonitor(MRef, [flush]),
-		ets:delete(TabId, ClientId);
+		ets:delete(?CLIENT_TAB, ClientId);
 	[_] -> 
 		ignore;
 	[] ->
@@ -131,15 +138,25 @@ handle_cast({unregister, ClientId, Pid}, State = #state{tab = TabId}) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info({'DOWN', MRef, process, DownPid, _Reason}, State = #state{tab = TabId}) ->
-	ets:match_delete(TabId, {'_', DownPid, MRef}),
+handle_info({'DOWN', MRef, process, DownPid, Reason}, State) ->
+    case ets:match_object(?CLIENT_TAB, {mqtt_client, '$1', '_', '_', DownPid, MRef, '_', '_'}) of
+        [] ->
+            ignore;
+        Clients ->
+            lists:foreach(
+                fun(Client = #mqtt_client{clientid = ClientId}) ->
+                        ets:delete_object(?CLIENT_TAB, Client),
+                        lager:error("Client ~s is Down: ~p", [ClientId, Reason]),
+                        emqttd_broker:foreach_hooks(client_disconnected, [Reason, ClientId])
+                end, Clients)
+    end,
     {noreply, setstats(State)};
 
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
-    ok.
+terminate(_Reason, #state{id = Id}) ->
+    gproc_pool:disconnect_worker(?CM_POOL, {?MODULE, Id}), ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -148,6 +165,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%=============================================================================
 
-setstats(State = #state{tab = TabId, statsfun = StatsFun}) ->
-    StatsFun(ets:info(TabId, size)), State.
+setstats(State = #state{statsfun = StatsFun}) ->
+    StatsFun(ets:info(?CLIENT_TAB, size)), State.
+
 

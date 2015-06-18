@@ -152,7 +152,7 @@ stop() ->
 %%%=============================================================================
 
 init([]) ->
-    {ok, AcOpts} = application:get_env(access),
+    {ok, AcOpts} = application:get_env(emqttd, access),
 	ets:new(?ACCESS_CONTROL_TAB, [set, named_table, protected, {read_concurrency, true}]),
     ets:insert(?ACCESS_CONTROL_TAB, {auth_modules, init_mods(auth, proplists:get_value(auth, AcOpts))}),
     ets:insert(?ACCESS_CONTROL_TAB, {acl_modules, init_mods(acl, proplists:get_value(acl, AcOpts))}),
@@ -179,6 +179,7 @@ handle_call({register_mod, Type, Mod, Opts}, _From, State) ->
                     ets:insert(?ACCESS_CONTROL_TAB, {tab_key(Type), [{Mod, ModState}|Mods]}),
                     ok;
                 {'EXIT', Error} ->
+                    lager:error("Access Control: register ~s error - ~p", [Mod, Error]),
                     {error, Error}
             end;
         _ -> 

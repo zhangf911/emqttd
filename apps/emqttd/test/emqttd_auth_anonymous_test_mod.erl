@@ -20,35 +20,20 @@
 %%% SOFTWARE.
 %%%-----------------------------------------------------------------------------
 %%% @doc
-%%% presence manager supervisor.
+%%% Test ACL Module.
 %%%
 %%% @end
 %%%-----------------------------------------------------------------------------
--module(emqttd_presence_sup).
+-module(emqttd_auth_anonymous_test_mod).
 
--behaviour(supervisor).
+%% ACL callbacks
+-export([init/1, check/3, description/0]).
 
-%% API
--export([start_link/0]).
+init(AclOpts) ->
+    {ok, AclOpts}.
 
-%% Supervisor callbacks
--export([init/1]).
+check(_Client, _Password, _Opts) ->
+    allow.
 
-%% Helper macro for declaring children of supervisor
--define(CHILD(I, Type), {I, {I, start_link, []}, permanent, 5000, Type, [I]}).
-
-%% ===================================================================
-%% API functions
-%% ===================================================================
-
-start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
-
-%% ===================================================================
-%% Supervisor callbacks
-%% ===================================================================
-
-init([]) ->
-    {ok, { {one_for_one, 5, 10}, []} }.
-
-
+description() ->
+    "Test emqttd_auth_anonymous Mod".

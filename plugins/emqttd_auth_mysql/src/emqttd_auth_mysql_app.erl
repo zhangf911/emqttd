@@ -1,5 +1,5 @@
 %%%-----------------------------------------------------------------------------
-%%% @Copyright (C) 2012-2015, Feng Lee <feng@emqtt.io>
+%%% Copyright (c) 2012-2015 eMQTT.IO, All Rights Reserved.
 %%%
 %%% Permission is hereby granted, free of charge, to any person obtaining a copy
 %%% of this software and associated documentation files (the "Software"), to deal
@@ -20,23 +20,40 @@
 %%% SOFTWARE.
 %%%-----------------------------------------------------------------------------
 %%% @doc
-%%% emqttd demo auth module.
+%%% emqttd mysql authentication app.
 %%%
 %%% @end
 %%%-----------------------------------------------------------------------------
--module(emqttd_plugin_demo_auth).
+-module(emqttd_auth_mysql_app).
 
--author("Feng Lee <feng@emqtt.io>").
+-behaviour(application).
+%% Application callbacks
+-export([start/2, prep_stop/1, stop/1]).
 
--include_lib("emqttd/include/emqttd.hrl").
+-behaviour(supervisor).
+%% Supervisor callbacks
+-export([init/1]).
 
--behaviour(emqttd_auth_mod).
+%%%=============================================================================
+%%% Application callbacks
+%%%=============================================================================
 
--export([init/1, check/3, description/0]).
+start(_StartType, _StartArgs) ->
+    Env = application:get_all_env(),
+    ok = emqttd_access_control:register_mod(auth, emqttd_auth_mysql, Env),
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-init(Opts) -> {ok, Opts}.
+prep_stop(State) ->
+    emqttd_access_control:unregister_mod(auth, emqttd_auth_mysql), State.
 
-check(_Client, _Password, _Opts) -> ignore.
+stop(_State) ->
+    ok.
 
-description() -> "Demo authentication module".
+%%%=============================================================================
+%%% Supervisor callbacks(Dummy)
+%%%=============================================================================
+
+init([]) ->
+    {ok, { {one_for_one, 5, 10}, []} }.
+
 

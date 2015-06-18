@@ -28,10 +28,11 @@
 
 -author("Feng Lee <feng@emqtt.io>").
 
--export([start/0, env/1,
+-export([start/0, env/1, env/2,
          open_listeners/1, close_listeners/1,
          load_all_plugins/0, unload_all_plugins/0,
          load_plugin/1, unload_plugin/1,
+         load_all_mods/0, is_mod_enabled/1,
          loaded_plugins/0,
          is_running/1]).
 
@@ -54,12 +55,16 @@ start() ->
     application:start(emqttd).
 
 %%------------------------------------------------------------------------------
-%% @doc Get mqtt environment
+%% @doc Get environment
 %% @end
 %%------------------------------------------------------------------------------
--spec env(atom()) -> undefined | any().
-env(Name) ->
-    proplists:get_value(Name, application:get_env(emqttd, mqtt, [])).
+-spec env(atom()) -> list().
+env(Group) ->
+    application:get_env(emqttd, Group, []).
+
+-spec env(atom(), atom()) -> undefined | any().
+env(Group, Name) ->
+    proplists:get_value(Name, env(Group)).
 
 %%------------------------------------------------------------------------------
 %% @doc Open Listeners
@@ -83,7 +88,7 @@ open_listener({http, Port, Options}) ->
 	mochiweb:start_http(Port, Options, MFArgs).
 
 open_listener(Protocol, Port, Options) ->
-    MFArgs = {emqttd_client, start_link, [env(packet)]},
+    MFArgs = {emqttd_client, start_link, [env(mqtt, packet)]},
     esockd:open(Protocol, Port, merge_sockopts(Options) , MFArgs).
 
 merge_sockopts(Options) ->
@@ -197,6 +202,17 @@ unload_app(App) ->
         {error, Reason} ->
             lager:error("unload plugin ~p error: ~p", [App, Reason]), {error, Reason}
     end.
+
+load_all_mods() ->
+    Mods = application:get_env(emqttd, modules, []),
+    lists:foreach(fun({Name, Opts}) -> 
+        Mod = list_to_atom("emqttd_mod_" ++ atom_to_list(Name)),
+        Mod:load(Opts),
+        lager:info("load module ~s successfully", [Name])
+    end, Mods).
+
+is_mod_enabled(Name) ->
+    env(modules, Name) =/= undefined.
 
 %%------------------------------------------------------------------------------
 %% @doc Is running?
